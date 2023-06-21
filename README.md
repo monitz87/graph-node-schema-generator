@@ -10,4 +10,4 @@ The schema generator is built from a modified version of the script located at `
 
 To run it, you just need to do
 
-`docker run monitz87/graphprotocol-schema-generator:latest "$(<PATH_TO_SCHEMA_FILE)"` and it will print the full schema to stdout
+`docker run --rm monitz87/graphprotocol-schema-generator:latest "$(<PATH_TO_SCHEMA_FILE)"` and it will print the full schema to stdout
