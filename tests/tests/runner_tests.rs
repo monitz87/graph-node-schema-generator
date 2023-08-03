@@ -24,7 +24,7 @@ use graph_tests::helpers::run_cmd;
 use slog::{o, Discard, Logger};
 
 struct RunnerTestRecipe {
-    stores: Stores,
+    pub stores: Stores,
     subgraph_name: SubgraphName,
     hash: DeploymentHash,
 }
@@ -160,8 +160,13 @@ async fn file_data_sources() {
         let block_3 = empty_block(block_2.ptr(), test_ptr(3));
         let block_4 = empty_block(block_3.ptr(), test_ptr(4));
         let mut block_5 = empty_block(block_4.ptr(), test_ptr(5));
-        push_test_log(&mut block_5, "createFile2");
-        vec![block_0, block_1, block_2, block_3, block_4, block_5]
+        push_test_log(&mut block_5, "spawnOffChainHandlerTest");
+        let block_6 = empty_block(block_5.ptr(), test_ptr(6));
+        let mut block_7 = empty_block(block_6.ptr(), test_ptr(7));
+        push_test_log(&mut block_7, "createFile2");
+        vec![
+            block_0, block_1, block_2, block_3, block_4, block_5, block_6, block_7,
+        ]
     };
 
     // This test assumes the file data sources will be processed in the same block in which they are
@@ -211,7 +216,7 @@ async fn file_data_sources() {
 
     assert_json_eq!(
         query_res,
-        Some(object! { ipfsFile1: object!{ id: id , content: content } })
+        Some(object! { ipfsFile1: object!{ id: id , content: content.clone() } })
     );
 
     ctx.start_and_sync_to(test_ptr(4)).await;
@@ -231,10 +236,35 @@ async fn file_data_sources() {
         causality_region = causality_region.next();
     }
 
-    let stop_block = test_ptr(5);
+    ctx.start_and_sync_to(test_ptr(5)).await;
+    let writable = ctx
+        .store
+        .clone()
+        .writable(ctx.logger.clone(), ctx.deployment.id, Arc::new(Vec::new()))
+        .await
+        .unwrap();
+    let data_sources = writable.load_dynamic_data_sources(vec![]).await.unwrap();
+    assert!(data_sources.len() == 4);
+
+    ctx.start_and_sync_to(test_ptr(6)).await;
+    let query_res = ctx
+        .query(&format!(
+            r#"{{ spawnTestEntity(id: "{id}") {{ id, content, context }} }}"#,
+        ))
+        .await
+        .unwrap();
+
+    assert_json_eq!(
+        query_res,
+        Some(
+            object! { spawnTestEntity: object!{ id: id , content: content.clone(), context: "fromSpawnTestHandler" } }
+        )
+    );
+
+    let stop_block = test_ptr(7);
     let err = ctx.start_and_sync_to_error(stop_block.clone()).await;
     let message = "entity type `IpfsFile1` is not on the 'entities' list for data source `File2`. \
-                   Hint: Add `IpfsFile1` to the 'entities' list, which currently is: `IpfsFile`.\twasm backtrace:\t    0: 0x3649 - <unknown>!src/mapping/handleFile1\t in handler `handleFile1` at block #5 ()".to_string();
+                   Hint: Add `IpfsFile1` to the 'entities' list, which currently is: `IpfsFile`.\twasm backtrace:\t    0: 0x3737 - <unknown>!src/mapping/handleFile1\t in handler `handleFile1` at block #7 ()".to_string();
     let expected_err = SubgraphError {
         subgraph_id: ctx.deployment.hash.clone(),
         message,
@@ -246,20 +276,20 @@ async fn file_data_sources() {
 
     // Unfail the subgraph to test a conflict between an onchain and offchain entity
     {
-        ctx.rewind(test_ptr(4));
+        ctx.rewind(test_ptr(6));
 
-        // Replace block number 5 with one that contains a different event
+        // Replace block number 7 with one that contains a different event
         let mut blocks = blocks.clone();
         blocks.pop();
-        let block_5_1_ptr = test_ptr_reorged(5, 1);
-        let mut block_5_1 = empty_block(test_ptr(4), block_5_1_ptr.clone());
-        push_test_log(&mut block_5_1, "saveConflictingEntity");
-        blocks.push(block_5_1);
+        let block_7_1_ptr = test_ptr_reorged(7, 1);
+        let mut block_7_1 = empty_block(test_ptr(6), block_7_1_ptr.clone());
+        push_test_log(&mut block_7_1, "saveConflictingEntity");
+        blocks.push(block_7_1);
 
         chain.set_block_stream(blocks);
 
         // Errors in the store pipeline can be observed by using the runner directly.
-        let runner = ctx.runner(block_5_1_ptr.clone()).await;
+        let runner = ctx.runner(block_7_1_ptr.clone()).await;
         let err = runner
             .run()
             .await
@@ -274,19 +304,19 @@ async fn file_data_sources() {
 
     // Unfail the subgraph to test a conflict between an onchain and offchain entity
     {
-        // Replace block number 5 with one that contains a different event
+        // Replace block number 7 with one that contains a different event
         let mut blocks = blocks.clone();
         blocks.pop();
-        let block_5_2_ptr = test_ptr_reorged(5, 2);
-        let mut block_5_2 = empty_block(test_ptr(4), block_5_2_ptr.clone());
-        push_test_log(&mut block_5_2, "createFile1");
-        blocks.push(block_5_2);
+        let block_7_2_ptr = test_ptr_reorged(7, 2);
+        let mut block_7_2 = empty_block(test_ptr(6), block_7_2_ptr.clone());
+        push_test_log(&mut block_7_2, "createFile1");
+        blocks.push(block_7_2);
 
         chain.set_block_stream(blocks);
 
         // Errors in the store pipeline can be observed by using the runner directly.
         let err = ctx
-            .runner(block_5_2_ptr.clone())
+            .runner(block_7_2_ptr.clone())
             .await
             .run()
             .await
@@ -295,6 +325,26 @@ async fn file_data_sources() {
 
         let message =
             "store error: conflicting key value violates exclusion constraint \"ipfs_file_1_id_block_range_excl\""
+                .to_string();
+        assert_eq!(err.to_string(), message);
+    }
+
+    {
+        ctx.rewind(test_ptr(6));
+        // Replace block number 7 with one that contains a different event
+        let mut blocks = blocks.clone();
+        blocks.pop();
+        let block_7_3_ptr = test_ptr_reorged(7, 1);
+        let mut block_7_3 = empty_block(test_ptr(6), block_7_3_ptr.clone());
+        push_test_log(&mut block_7_3, "spawnOnChainHandlerTest");
+        blocks.push(block_7_3);
+
+        chain.set_block_stream(blocks);
+
+        // Errors in the store pipeline can be observed by using the runner directly.
+        let err = ctx.start_and_sync_to_error(block_7_3_ptr).await;
+        let message =
+            "Attempted to create on-chain data source in offchain data source handler. This is not yet supported. at block #7 (0000000100000000000000000000000000000000000000000000000000000007)"
                 .to_string();
         assert_eq!(err.to_string(), message);
     }
@@ -453,6 +503,68 @@ async fn fatal_error() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[tokio::test]
+async fn poi_for_deterministically_failed_sg() -> anyhow::Result<()> {
+    let RunnerTestRecipe {
+        stores,
+        subgraph_name,
+        hash,
+    } = RunnerTestRecipe::new("fatal-error").await;
+
+    let blocks = {
+        let block_0 = genesis();
+        let block_1 = empty_block(block_0.ptr(), test_ptr(1));
+        let block_2 = empty_block(block_1.ptr(), test_ptr(2));
+        let block_3 = empty_block(block_2.ptr(), test_ptr(3));
+        // let block_4 = empty_block(block_3.ptr(), test_ptr(4));
+        vec![block_0, block_1, block_2, block_3]
+    };
+
+    let stop_block = blocks.last().unwrap().block.ptr();
+
+    let chain = chain(blocks.clone(), &stores, None).await;
+    let ctx = fixture::setup(subgraph_name.clone(), &hash, &stores, &chain, None, None).await;
+
+    ctx.start_and_sync_to_error(stop_block).await;
+
+    // Go through the indexing status API to also test it.
+    let status = ctx.indexing_status().await;
+    assert!(status.health == SubgraphHealth::Failed);
+    assert!(status.entity_count == 1.into()); // Only PoI
+    let err = status.fatal_error.unwrap();
+    assert!(err.block.number == 3.into());
+    assert!(err.deterministic);
+
+    let sg_store = stores.network_store.subgraph_store();
+
+    let poi2 = sg_store
+        .get_proof_of_indexing(&hash, &None, test_ptr(2))
+        .await
+        .unwrap();
+
+    // All POIs past this point should be the same
+    let poi3 = sg_store
+        .get_proof_of_indexing(&hash, &None, test_ptr(3))
+        .await
+        .unwrap();
+    assert!(poi2 != poi3);
+
+    let poi4 = sg_store
+        .get_proof_of_indexing(&hash, &None, test_ptr(4))
+        .await
+        .unwrap();
+    assert_eq!(poi3, poi4);
+    assert!(poi2 != poi4);
+
+    let poi100 = sg_store
+        .get_proof_of_indexing(&hash, &None, test_ptr(100))
+        .await
+        .unwrap();
+    assert_eq!(poi4, poi100);
+    assert!(poi2 != poi100);
+
+    Ok(())
+}
 async fn build_subgraph(dir: &str) -> DeploymentHash {
     build_subgraph_with_yarn_cmd(dir, "deploy:test").await
 }

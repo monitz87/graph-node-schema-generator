@@ -262,7 +262,7 @@ impl Drop for TestContext {
 pub struct Stores {
     network_name: String,
     chain_head_listener: Arc<ChainHeadUpdateListener>,
-    network_store: Arc<Store>,
+    pub network_store: Arc<Store>,
     chain_store: Arc<ChainStore>,
 }
 
@@ -496,7 +496,7 @@ pub async fn wait_for_sync(
                 continue;
             }
         };
-
+        info!(logger, "TEST: sync status: {:?}", block_ptr);
         let status = store.status_for_id(deployment.id);
 
         if let Some(fatal_error) = status.fatal_error {
