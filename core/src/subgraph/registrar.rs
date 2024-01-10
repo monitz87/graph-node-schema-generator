@@ -13,6 +13,9 @@ use graph::prelude::{
     CreateSubgraphResult, SubgraphAssignmentProvider as SubgraphAssignmentProviderTrait,
     SubgraphRegistrar as SubgraphRegistrarTrait, *,
 };
+use graph::tokio_retry::Retry;
+use graph::util::futures::retry_strategy;
+use graph::util::futures::RETRY_DEFAULT_LIMIT;
 
 pub struct SubgraphRegistrar<P, S, SM> {
     logger: Logger,
@@ -403,6 +406,24 @@ where
                 )
                 .await?
             }
+            BlockchainKind::Starknet => {
+                create_subgraph_version::<graph_chain_starknet::Chain, _>(
+                    &logger,
+                    self.store.clone(),
+                    self.chains.cheap_clone(),
+                    name.clone(),
+                    hash.cheap_clone(),
+                    start_block_override,
+                    graft_block_override,
+                    raw,
+                    node_id,
+                    debug_fork,
+                    self.version_switching_mode,
+                    &self.resolver,
+                    history_blocks,
+                )
+                .await?
+            }
         };
 
         debug!(
@@ -518,15 +539,18 @@ async fn resolve_start_block(
         .expect("cannot identify minimum start block because there are no data sources")
     {
         0 => Ok(None),
-        min_start_block => chain
-            .block_pointer_from_number(logger, min_start_block - 1)
-            .await
-            .map(Some)
-            .map_err(move |_| {
-                SubgraphRegistrarError::ManifestValidationError(vec![
-                    SubgraphManifestValidationError::BlockNotFound(min_start_block.to_string()),
-                ])
-            }),
+        min_start_block => Retry::spawn(retry_strategy(Some(2), RETRY_DEFAULT_LIMIT), move || {
+            chain
+                .block_pointer_from_number(&logger, min_start_block - 1)
+                .inspect_err(move |e| warn!(&logger, "Failed to get block number: {}", e))
+        })
+        .await
+        .map(Some)
+        .map_err(move |_| {
+            SubgraphRegistrarError::ManifestValidationError(vec![
+                SubgraphManifestValidationError::BlockNotFound(min_start_block.to_string()),
+            ])
+        }),
     }
 }
 
@@ -588,6 +612,8 @@ async fn create_subgraph_version<C: Blockchain, S: SubgraphStore>(
         .validate(store.cheap_clone(), should_validate)
         .await
         .map_err(SubgraphRegistrarError::ManifestValidationError)?;
+
+    let history_blocks = history_blocks.or(manifest.history_blocks());
 
     let network_name = manifest.network_name();
 

@@ -119,6 +119,10 @@ pub struct EnvVars {
     pub subgraph_version_switching_mode: SubgraphVersionSwitchingMode,
     /// Set by the flag `GRAPH_KILL_IF_UNRESPONSIVE`. Off by default.
     pub kill_if_unresponsive: bool,
+    /// Max timeout in seconds before killing the node.
+    /// Set by the environment variable `GRAPH_KILL_IF_UNRESPONSIVE_TIMEOUT_SECS`
+    /// (expressed in seconds). The default value is 10s.
+    pub kill_if_unresponsive_timeout: Duration,
     /// Guards public access to POIs in the `index-node`.
     ///
     /// Set by the environment variable `GRAPH_POI_ACCESS_TOKEN`. No default
@@ -172,9 +176,23 @@ pub struct EnvVars {
     /// Set by the environment variable `ETHEREUM_REORG_THRESHOLD`. The default
     /// value is 250 blocks.
     pub reorg_threshold: BlockNumber,
+    /// The time to wait between polls when using polling block ingestor.
+    /// The value is set by `ETHERUM_POLLING_INTERVAL` in millis and the
+    /// default is 1000.
+    pub ingestor_polling_interval: Duration,
     /// Set by the env var `GRAPH_EXPERIMENTAL_SUBGRAPH_SETTINGS` which should point
     /// to a file with subgraph-specific settings
     pub subgraph_settings: Option<String>,
+    /// Whether to prefer substreams blocks streams over firehose when available.
+    pub prefer_substreams_block_streams: bool,
+    /// Set by the flag `GRAPH_ENABLE_GAS_METRICS`. Whether to enable
+    /// gas metrics. Off by default.
+    pub enable_gas_metrics: bool,
+    /// Set by the env var `GRAPH_EXPERIMENTAL_TIMESERIES`. Defaults to true
+    /// for debug builds and false for release builds. This default behavior
+    /// is there to simplify development and will be changed to `false` when
+    /// we get closer to release
+    pub enable_timeseries: bool,
 }
 
 impl EnvVars {
@@ -218,6 +236,9 @@ impl EnvVars {
             experimental_static_filters: inner.experimental_static_filters.0,
             subgraph_version_switching_mode: inner.subgraph_version_switching_mode,
             kill_if_unresponsive: inner.kill_if_unresponsive.0,
+            kill_if_unresponsive_timeout: Duration::from_secs(
+                inner.kill_if_unresponsive_timeout_secs,
+            ),
             poi_access_token: inner.poi_access_token,
             subgraph_max_data_sources: inner.subgraph_max_data_sources.0,
             disable_fail_fast: inner.disable_fail_fast.0,
@@ -232,7 +253,11 @@ impl EnvVars {
             external_ws_base_url: inner.external_ws_base_url,
             static_filters_threshold: inner.static_filters_threshold,
             reorg_threshold: inner.reorg_threshold,
+            ingestor_polling_interval: Duration::from_millis(inner.ingestor_polling_interval),
             subgraph_settings: inner.subgraph_settings,
+            prefer_substreams_block_streams: inner.prefer_substreams_block_streams,
+            enable_gas_metrics: inner.enable_gas_metrics.0,
+            enable_timeseries: inner.enable_timeseries.unwrap_or(cfg!(debug_assertions)),
         })
     }
 
@@ -285,7 +310,7 @@ struct Inner {
         default = "false"
     )]
     allow_non_deterministic_fulltext_search: EnvVarBoolean,
-    #[envconfig(from = "GRAPH_MAX_SPEC_VERSION", default = "0.0.7")]
+    #[envconfig(from = "GRAPH_MAX_SPEC_VERSION", default = "0.0.9")]
     max_spec_version: Version,
     #[envconfig(from = "GRAPH_LOAD_WINDOW_SIZE", default = "300")]
     load_window_size_in_secs: u64,
@@ -322,6 +347,8 @@ struct Inner {
     subgraph_version_switching_mode: SubgraphVersionSwitchingMode,
     #[envconfig(from = "GRAPH_KILL_IF_UNRESPONSIVE", default = "false")]
     kill_if_unresponsive: EnvVarBoolean,
+    #[envconfig(from = "GRAPH_KILL_IF_UNRESPONSIVE_TIMEOUT_SECS", default = "10")]
+    kill_if_unresponsive_timeout_secs: u64,
     #[envconfig(from = "GRAPH_POI_ACCESS_TOKEN")]
     poi_access_token: Option<String>,
     #[envconfig(from = "GRAPH_SUBGRAPH_MAX_DATA_SOURCES", default = "1_000_000_000")]
@@ -351,8 +378,19 @@ struct Inner {
     // JSON-RPC specific.
     #[envconfig(from = "ETHEREUM_REORG_THRESHOLD", default = "250")]
     reorg_threshold: BlockNumber,
+    #[envconfig(from = "ETHEREUM_POLLING_INTERVAL", default = "1000")]
+    ingestor_polling_interval: u64,
     #[envconfig(from = "GRAPH_EXPERIMENTAL_SUBGRAPH_SETTINGS")]
     subgraph_settings: Option<String>,
+    #[envconfig(
+        from = "GRAPH_EXPERIMENTAL_PREFER_SUBSTREAMS_BLOCK_STREAMS",
+        default = "false"
+    )]
+    prefer_substreams_block_streams: bool,
+    #[envconfig(from = "GRAPH_ENABLE_GAS_METRICS", default = "false")]
+    enable_gas_metrics: EnvVarBoolean,
+    #[envconfig(from = "GRAPH_EXPERIMENTAL_TIMESERIES")]
+    enable_timeseries: Option<bool>,
 }
 
 #[derive(Clone, Debug)]

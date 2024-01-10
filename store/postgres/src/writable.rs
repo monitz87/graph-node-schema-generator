@@ -6,17 +6,16 @@ use std::time::{Duration, Instant};
 use std::{collections::BTreeMap, sync::Arc};
 
 use graph::blockchain::block_stream::FirehoseCursor;
-use graph::components::store::{
-    Batch, DeploymentCursorTracker, DerivedEntityQuery, EntityKey, ReadStore,
-};
+use graph::components::store::{Batch, DeploymentCursorTracker, DerivedEntityQuery, ReadStore};
 use graph::constraint_violation;
+use graph::data::store::IdList;
 use graph::data::subgraph::schema;
 use graph::data_source::CausalityRegion;
 use graph::prelude::{
     BlockNumber, CacheWeight, Entity, MetricsRegistry, SubgraphDeploymentEntity,
     SubgraphStore as _, BLOCK_NUMBER_MAX,
 };
-use graph::schema::InputSchema;
+use graph::schema::{EntityKey, EntityType, InputSchema};
 use graph::slog::{info, warn};
 use graph::tokio::select;
 use graph::tokio::sync::Notify;
@@ -24,7 +23,7 @@ use graph::tokio::task::JoinHandle;
 use graph::util::bounded_queue::BoundedQueue;
 use graph::{
     cheap_clone::CheapClone,
-    components::store::{self, write::EntityOp, EntityType, WritableStore as WritableStoreTrait},
+    components::store::{self, write::EntityOp, WritableStore as WritableStoreTrait},
     data::subgraph::schema::SubgraphError,
     prelude::{
         BlockPtr, DeploymentHash, EntityModification, Error, Logger, StopwatchMetrics, StoreError,
@@ -59,7 +58,7 @@ impl WritableSubgraphStore {
         self.0.layout(id)
     }
 
-    fn load_deployment(&self, site: &Site) -> Result<SubgraphDeploymentEntity, StoreError> {
+    fn load_deployment(&self, site: Arc<Site>) -> Result<SubgraphDeploymentEntity, StoreError> {
         self.0.load_deployment(site)
     }
 
@@ -76,7 +75,7 @@ struct SyncStore {
     store: WritableSubgraphStore,
     writable: Arc<DeploymentStore>,
     site: Arc<Site>,
-    input_schema: Arc<InputSchema>,
+    input_schema: InputSchema,
     manifest_idx_and_name: Arc<Vec<(u32, String)>>,
 }
 
@@ -136,7 +135,7 @@ impl SyncStore {
             let graft_base = match self.writable.graft_pending(&self.site.deployment)? {
                 Some((base_id, base_ptr)) => {
                     let src = self.store.layout(&base_id)?;
-                    let deployment_entity = self.store.load_deployment(&src.site)?;
+                    let deployment_entity = self.store.load_deployment(src.site.clone())?;
                     Some((src, base_ptr, deployment_entity))
                 }
                 None => None,
@@ -237,12 +236,13 @@ impl SyncStore {
         keys: BTreeSet<EntityKey>,
         block: BlockNumber,
     ) -> Result<BTreeMap<EntityKey, Entity>, StoreError> {
-        let mut by_type: BTreeMap<(EntityType, CausalityRegion), Vec<String>> = BTreeMap::new();
+        let mut by_type: BTreeMap<(EntityType, CausalityRegion), IdList> = BTreeMap::new();
         for key in keys {
+            let id_type = key.entity_type.id_type()?;
             by_type
                 .entry((key.entity_type, key.causality_region))
-                .or_default()
-                .push(key.entity_id.into());
+                .or_insert_with(|| IdList::new(id_type))
+                .push(key.entity_id)?;
         }
 
         retry::forever(&self.logger, "get_many", || {
@@ -366,8 +366,8 @@ impl SyncStore {
         .await
     }
 
-    fn input_schema(&self) -> Arc<InputSchema> {
-        self.input_schema.clone()
+    fn input_schema(&self) -> InputSchema {
+        self.input_schema.cheap_clone()
     }
 }
 
@@ -729,6 +729,16 @@ pub(crate) mod test_support {
             queue.push(()).await
         }
     }
+
+    pub async fn flush_steps(deployment: graph::components::store::DeploymentId) {
+        let queue = {
+            let mut map = STEPS.lock().unwrap();
+            map.remove(&deployment)
+        };
+        if let Some(queue) = queue {
+            queue.push(()).await;
+        }
+    }
 }
 
 impl std::fmt::Debug for Queue {
@@ -849,6 +859,7 @@ impl Queue {
             store.site.deployment.clone(),
             "writer",
             registry,
+            store.shard().to_string(),
         );
 
         let batch_ready_notify = Arc::new(Notify::new());
@@ -991,6 +1002,10 @@ impl Queue {
     /// Wait for the background writer to finish processing queued entries
     async fn flush(&self) -> Result<(), StoreError> {
         self.check_err()?;
+
+        #[cfg(debug_assertions)]
+        test_support::flush_steps(self.store.site.id.into()).await;
+
         // Turn off batching so the queue doesn't wait for a batch to become
         // full, but restore the old behavior once the queue is empty.
         let batching = self.batch_writes.load(Ordering::SeqCst);
@@ -1062,8 +1077,14 @@ impl Queue {
             &self.queue,
             BTreeMap::new(),
             |mut map: BTreeMap<EntityKey, Option<Entity>>, batch, at| {
-                // See if we have changes for any of the keys.
+                // See if we have changes for any of the keys. Since we are
+                // going from newest to oldest block, do not clobber already
+                // existing entries in map as that would make us use an
+                // older value.
                 for key in &keys {
+                    if map.contains_key(key) {
+                        continue;
+                    }
                     match batch.last_op(key, at) {
                         Some(EntityOp::Write { key: _, entity }) => {
                             map.insert(key.clone(), Some(entity.clone()));
@@ -1100,7 +1121,7 @@ impl Queue {
         fn is_related(derived_query: &DerivedEntityQuery, entity: &Entity) -> bool {
             entity
                 .get(&derived_query.entity_field)
-                .map(|related_id| related_id.as_str() == Some(&derived_query.value))
+                .map(|v| &derived_query.value == v)
                 .unwrap_or(false)
         }
 
@@ -1125,7 +1146,14 @@ impl Queue {
             &self.queue,
             BTreeMap::new(),
             |mut map: BTreeMap<EntityKey, Option<Entity>>, batch, at| {
-                map.extend(effective_ops(batch, derived_query, at));
+                // Since we are going newest to oldest, do not clobber
+                // already existing entries in map as that would make us
+                // produce stale values
+                for (k, v) in effective_ops(batch, derived_query, at) {
+                    if !map.contains_key(&k) {
+                        map.insert(k, v);
+                    }
+                }
                 map
             },
         );
@@ -1409,7 +1437,7 @@ impl ReadStore for WritableStore {
         self.writer.get_derived(key)
     }
 
-    fn input_schema(&self) -> Arc<InputSchema> {
+    fn input_schema(&self) -> InputSchema {
         self.store.input_schema()
     }
 }
@@ -1421,6 +1449,10 @@ impl DeploymentCursorTracker for WritableStore {
 
     fn firehose_cursor(&self) -> FirehoseCursor {
         self.block_cursor.lock().unwrap().clone()
+    }
+
+    fn input_schema(&self) -> InputSchema {
+        self.store.input_schema()
     }
 }
 
@@ -1498,7 +1530,6 @@ impl WritableStoreTrait for WritableStore {
         is_non_fatal_errors_active: bool,
     ) -> Result<(), StoreError> {
         let batch = Batch::new(
-            self.store.input_schema.cheap_clone(),
             block_ptr_to.clone(),
             firehose_cursor.clone(),
             mods,

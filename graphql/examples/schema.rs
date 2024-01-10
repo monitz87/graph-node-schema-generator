@@ -1,8 +1,7 @@
-use graphql_parser::parse_schema;
+use graph::prelude::DeploymentHash;
+use graph::schema::InputSchema;
 use std::env;
 use std::process::exit;
-
-use graph::schema::api_schema;
 
 pub fn usage(msg: &str) -> ! {
     println!("{}", msg);
@@ -28,12 +27,9 @@ pub fn main() {
         2 => args[1].clone(),
         _ => usage("too many arguments"),
     };
+    let id = DeploymentHash::new("unknown").unwrap();
+    let schema = ensure(InputSchema::parse(&schema, id), "Failed to parse schema");
+    let schema = ensure(schema.api_schema(), "Failed to convert to API schema");
 
-    let schema = ensure(
-        parse_schema(&schema).map(|v| v.into_static()),
-        "Failed to parse schema",
-    );
-    let schema = ensure(api_schema(&schema), "Failed to convert to API schema");
-
-    println!("{}", schema);
+    println!("{}", schema.schema().document);
 }

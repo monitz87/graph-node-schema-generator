@@ -378,21 +378,14 @@ where
             (Method::POST, &["subgraphs", "name", subgraph_name]) => self
                 .handle_graphql_query_by_name(subgraph_name.to_owned(), req)
                 .boxed(),
-            (Method::POST, ["subgraphs", "name", subgraph_name_part1, subgraph_name_part2]) => {
-                let subgraph_name = format!("{}/{}", subgraph_name_part1, subgraph_name_part2);
-                self.handle_graphql_query_by_name(subgraph_name, req)
-                    .boxed()
-            }
-            (Method::POST, ["subgraphs", "network", subgraph_name_part1, subgraph_name_part2]) => {
-                let subgraph_name =
-                    format!("network/{}/{}", subgraph_name_part1, subgraph_name_part2);
+            (Method::POST, ["subgraphs", "name", ..]) => {
+                let subgraph_name = path_segments[2..].join("/");
                 self.handle_graphql_query_by_name(subgraph_name, req)
                     .boxed()
             }
 
             (Method::OPTIONS, ["subgraphs", "name", _])
-            | (Method::OPTIONS, ["subgraphs", "name", _, _])
-            | (Method::OPTIONS, ["subgraphs", "network", _, _]) => self.handle_graphql_options(req),
+            | (Method::OPTIONS, ["subgraphs", "name", _, _]) => self.handle_graphql_options(req),
 
             _ => self.handle_not_found(),
         }
@@ -474,10 +467,7 @@ mod tests {
     use hyper::service::Service;
     use hyper::{Body, Method, Request};
 
-    use graph::data::{
-        graphql::effort::LoadManager,
-        query::{QueryResults, QueryTarget},
-    };
+    use graph::data::query::{QueryResults, QueryTarget};
     use graph::prelude::*;
 
     use crate::test_utils;
@@ -498,6 +488,7 @@ mod tests {
         fn observe_query_parsing(&self, _duration: Duration, _results: &QueryResults) {}
         fn observe_query_validation(&self, _duration: Duration, _id: &DeploymentHash) {}
         fn observe_query_validation_error(&self, _error_codes: Vec<&str>, _id: &DeploymentHash) {}
+        fn observe_query_blocks_behind(&self, _blocks_behind: i32, _id: &DeploymentHash) {}
     }
 
     #[async_trait]
@@ -526,10 +517,6 @@ mod tests {
             _target: QueryTarget,
         ) -> Result<SubscriptionResult, SubscriptionError> {
             unreachable!();
-        }
-
-        fn load_manager(&self) -> Arc<LoadManager> {
-            unimplemented!()
         }
 
         fn metrics(&self) -> Arc<dyn GraphQLMetrics> {
